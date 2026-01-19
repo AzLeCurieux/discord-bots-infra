@@ -1,0 +1,40 @@
+# Secrets — never commit
+infra/ansible/group_vars/all/vault.yml
+infra/ansible/group_vars/all/*.vault
+*.vault
+.env
+.env.*
+!.env.example
+
+# Terraform state and credentials
+infra/terraform/.terraform/
+infra/terraform/terraform.tfstate
+infra/terraform/terraform.tfstate.backup
+infra/terraform/.terraform.lock.hcl
+infra/terraform/terraform.tfvars
+infra/terraform/*.tfvars
+*.tfplan
+
+# Node.js
+bots/bot-status/node_modules/
+bots/bot-status/npm-debug.log*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Docker local test artifacts
+docker-compose.local.yml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
