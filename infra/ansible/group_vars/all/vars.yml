@@ -1,0 +1,101 @@
+---
+
+bot_user: "bot-runner"
+bot_user_uid: 1001
+bot_user_shell: "/sbin/nologin"
+bot_user_home: "/opt/discord-bots"
+
+bots_dir: "/opt/discord-bots"
+monitoring_dir: "/opt/monitoring"
+logs_dir: "/var/log/discord-bots"
+
+docker_compose_version: "2.23.3"
+docker_log_max_size: "10m"
+docker_log_max_file: "3"
+
+ghcr_registry: "ghcr.io"
+ghcr_namespace: "VOTRE_USERNAME"
+
+bot_names:
+  - bot-moderation
+  - bot-status
+
+bot_images:
+  bot-moderation:
+    image: "{{ ghcr_registry }}/{{ ghcr_namespace }}/bot-moderation"
+    tag: "latest"
+    port: 8080
+  bot-status:
+    image: "{{ ghcr_registry }}/{{ ghcr_namespace }}/bot-status"
+    tag: "latest"
+    port: null
+
+bot_memory_limit: "256m"
+bot_cpu_limit: "0.5"
+bot_memory_reservation: "128m"
+
+prometheus_version: "v2.48.0"
+grafana_version: "10.2.2"
+node_exporter_version: "v1.7.0"
+cadvisor_version: "v0.47.2"
+
+# All monitoring interfaces bind to loopback only.
+# Access via SSH tunnel: ssh -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 -p 2222 bot-runner@<SERVER_IP>
+monitoring_port: 9090
+grafana_port: 3000
+node_exporter_port: 9100
+cadvisor_port: 8080
+
+prometheus_retention: "15d"
+prometheus_storage_size: "10GB"
+
+ssh_port: 2222
+
+# Restrict SSH to declared admin IPs only.
+# For development without a fixed IP, use "0.0.0.0/0" and rely on fail2ban,
+# but this is not acceptable in a production context.
+admin_ips: []  # Override in host_vars or via -e "admin_ips=['x.x.x.x/32']"
+
+ufw_allowed_ports:
+  - port: "{{ ssh_port }}"
+    proto: tcp
+    src: "{{ admin_ips | join(',') if admin_ips else omit }}"
+    comment: "SSH"
+
+common_packages:
+  - curl
+  - wget
+  - git
+  - htop
+  - vim
+  - ufw
+  - fail2ban
+  - unattended-upgrades
+  - apt-listchanges
+  - logrotate
+  - ca-certificates
+  - gnupg
+  - lsb-release
+  - net-tools
+  - iotop
+  - jq
+
+sysctl_hardening:
+  net.ipv4.ip_forward: 0
+  net.ipv6.conf.all.forwarding: 0
+  net.ipv4.tcp_syncookies: 1
+  net.ipv4.tcp_max_syn_backlog: 2048
+  net.ipv4.tcp_synack_retries: 2
+  net.ipv4.tcp_syn_retries: 5
+  net.ipv4.conf.all.accept_redirects: 0
+  net.ipv4.conf.default.accept_redirects: 0
+  net.ipv6.conf.all.accept_redirects: 0
+  net.ipv4.icmp_echo_ignore_broadcasts: 1
+  net.ipv4.conf.all.rp_filter: 1
+  net.ipv4.conf.default.rp_filter: 1
+  net.ipv4.conf.all.accept_source_route: 0
+  net.ipv4.conf.default.accept_source_route: 0
+  net.ipv4.conf.all.log_martians: 1
+  kernel.sysrq: 0
+  kernel.dmesg_restrict: 1
+  fs.suid_dumpable: 0

@@ -1,0 +1,32 @@
+# =============================================================================
+# Exemple de vault Ansible — NE JAMAIS committer vault.yml avec de vraies valeurs !
+# =============================================================================
+# Usage :
+#   1. Copier ce fichier : cp vault.yml.example vault.yml
+#   2. Remplacer les valeurs par les vraies (tokens Discord, mots de passe, etc.)
+#   3. Chiffrer : ansible-vault encrypt vault.yml
+#   4. Ajouter vault.yml au .gitignore (déjà fait)
+#
+# Pour éditer un vault existant :
+#   ansible-vault edit vault.yml
+#
+# Pour voir le contenu déchiffré :
+#   ansible-vault view vault.yml
+# =============================================================================
+
+# ── Tokens Discord ────────────────────────────────────────────────────────────
+vault_discord_token_moderation: "YOUR_BOT_TOKEN_HERE"
+vault_discord_token_status: "YOUR_BOT_TOKEN_HERE"
+
+# ── IDs Discord ───────────────────────────────────────────────────────────────
+vault_guild_id: "123456789012345678"
+vault_log_channel_id: "123456789012345678"
+vault_status_channel_id: "123456789012345678"
+
+# ── Monitoring ────────────────────────────────────────────────────────────────
+vault_grafana_admin_password: "CHANGE_ME"
+
+# ── Registre Docker (GHCR) ────────────────────────────────────────────────────
+# Personal Access Token GitHub avec la permission write:packages
+vault_ghcr_token: "ghp_VOTRE_TOKEN_ICI"
+vault_ghcr_username: "VOTRE_USERNAME_GITHUB"
