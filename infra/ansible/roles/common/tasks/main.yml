@@ -1,0 +1,142 @@
+---
+
+- name: "common | update apt cache"
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  tags: packages
+
+- name: "common | full dist-upgrade"
+  ansible.builtin.apt:
+    upgrade: dist
+    autoremove: true
+    autoclean: true
+  tags: packages
+
+- name: "common | install base packages"
+  ansible.builtin.apt:
+    name: "{{ common_packages }}"
+    state: present
+  tags: packages
+
+- name: "common | set timezone"
+  community.general.timezone:
+    name: Europe/Paris
+  tags: system
+
+- name: "common | generate fr_FR.UTF-8 locale"
+  ansible.builtin.locale_gen:
+    name: fr_FR.UTF-8
+    state: present
+  tags: system
+
+- name: "common | create bot-runner system group"
+  ansible.builtin.group:
+    name: "{{ bot_user }}"
+    gid: "{{ bot_user_uid }}"
+    system: true
+    state: present
+  tags: users
+
+- name: "common | create bot-runner system user"
+  ansible.builtin.user:
+    name: "{{ bot_user }}"
+    uid: "{{ bot_user_uid }}"
+    group: "{{ bot_user }}"
+    home: "{{ bots_dir }}"
+    create_home: false
+    shell: "{{ bot_user_shell }}"
+    system: true
+    comment: "Discord bots service account"
+    state: present
+  tags: users
+
+- name: "common | create /opt/discord-bots directory"
+  ansible.builtin.file:
+    path: "{{ bots_dir }}"
+    state: directory
+    owner: "{{ bot_user }}"
+    group: "{{ bot_user }}"
+    mode: "0750"
+  tags: directories
+
+- name: "common | create per-bot subdirectories"
+  ansible.builtin.file:
+    path: "{{ bots_dir }}/{{ item }}"
+    state: directory
+    owner: "{{ bot_user }}"
+    group: "{{ bot_user }}"
+    mode: "0750"
+  loop: "{{ bot_names }}"
+  tags: directories
+
+- name: "common | create log directory"
+  ansible.builtin.file:
+    path: "{{ logs_dir }}"
+    state: directory
+    owner: "{{ bot_user }}"
+    group: "{{ bot_user }}"
+    mode: "0755"
+  tags: directories
+
+- name: "common | configure logrotate for bot logs"
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/discord-bots
+    content: |
+      {{ logs_dir }}/*.log {
+          daily
+          missingok
+          rotate 14
+          compress
+          delaycompress
+          notifempty
+          create 0644 {{ bot_user }} {{ bot_user }}
+          sharedscripts
+          postrotate
+              docker compose -f {{ bots_dir }}/docker-compose.yml kill -s HUP 2>/dev/null || true
+          endscript
+      }
+    owner: root
+    group: root
+    mode: "0644"
+  tags: logging
+
+- name: "common | configure unattended-upgrades (security only)"
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/50unattended-upgrades
+    content: |
+      Unattended-Upgrade::Allowed-Origins {
+          "${distro_id}:${distro_codename}-security";
+          "${distro_id}ESMApps:${distro_codename}-apps-security";
+      };
+      Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+      Unattended-Upgrade::MinimalSteps "true";
+      Unattended-Upgrade::InstallOnShutdown "false";
+      Unattended-Upgrade::Remove-Unused-Dependencies "true";
+      Unattended-Upgrade::Automatic-Reboot "false";
+      Unattended-Upgrade::Mail "root";
+      Unattended-Upgrade::MailReport "on-change";
+    owner: root
+    group: root
+    mode: "0644"
+  tags: updates
+
+- name: "common | enable automatic upgrades timer"
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Download-Upgradeable-Packages "1";
+      APT::Periodic::AutocleanInterval "7";
+      APT::Periodic::Unattended-Upgrade "1";
+    owner: root
+    group: root
+    mode: "0644"
+  tags: updates
+
+- name: "common | start and enable unattended-upgrades"
+  ansible.builtin.service:
+    name: unattended-upgrades
+    state: started
+    enabled: true
+  tags: updates
