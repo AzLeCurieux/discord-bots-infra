@@ -1,0 +1,126 @@
+---
+
+- name: "security | deploy hardened sshd_config"
+  ansible.builtin.template:
+    src: sshd_config.j2
+    dest: /etc/ssh/sshd_config
+    owner: root
+    group: root
+    mode: "0600"
+    validate: /usr/sbin/sshd -t -f %s
+  notify: restart ssh
+  tags: ssh
+
+- name: "security | create .ssh directory for bot-runner"
+  ansible.builtin.file:
+    path: "{{ bots_dir }}/.ssh"
+    state: directory
+    owner: "{{ bot_user }}"
+    group: "{{ bot_user }}"
+    mode: "0700"
+  tags: ssh
+
+- name: "security | set SSH login warning banner"
+  ansible.builtin.copy:
+    dest: /etc/ssh/banner
+    content: |
+      WARNING: Authorized access only. All connections are logged and monitored.
+      Unauthorized access is prohibited and subject to legal action.
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart ssh
+  tags: ssh
+
+- name: "security | reset UFW to defaults"
+  community.general.ufw:
+    state: reset
+  tags: ufw
+
+- name: "security | deny all incoming traffic by default"
+  community.general.ufw:
+    default: deny
+    direction: incoming
+  tags: ufw
+
+- name: "security | allow all outgoing traffic by default"
+  community.general.ufw:
+    default: allow
+    direction: outgoing
+  tags: ufw
+
+- name: "security | open allowed ports"
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port | string }}"
+    proto: "{{ item.proto }}"
+    src: "{{ item.src | default(omit) }}"
+    comment: "{{ item.comment }}"
+  loop: "{{ ufw_allowed_ports }}"
+  tags: ufw
+
+- name: "security | enable UFW with logging"
+  community.general.ufw:
+    state: enabled
+    logging: "on"
+  notify: reload ufw
+  tags: ufw
+
+- name: "security | deploy fail2ban configuration"
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.local
+    content: |
+      [DEFAULT]
+      bantime  = 1h
+      findtime = 10m
+      maxretry = 5
+      backend  = systemd
+      banaction = ufw
+
+      [sshd]
+      enabled  = true
+      port     = {{ ssh_port }}
+      filter   = sshd
+      logpath  = /var/log/auth.log
+      maxretry = 3
+      bantime  = 24h
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart fail2ban
+  tags: fail2ban
+
+- name: "security | enable and start fail2ban"
+  ansible.builtin.service:
+    name: fail2ban
+    state: started
+    enabled: true
+  tags: fail2ban
+
+- name: "security | apply kernel hardening parameters"
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-hardening.conf
+  loop: "{{ sysctl_hardening | dict2items }}"
+  tags: sysctl
+
+- name: "security | install apt-listchanges for security notifications"
+  ansible.builtin.apt:
+    name: apt-listchanges
+    state: present
+  tags: updates
+
+- name: "security | disable unused services"
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop:
+    - bluetooth
+    - cups
+    - avahi-daemon
+  failed_when: false
+  tags: services
