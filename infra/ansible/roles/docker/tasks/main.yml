@@ -1,0 +1,123 @@
+---
+
+- name: "docker | remove conflicting legacy packages"
+  ansible.builtin.apt:
+    name:
+      - docker
+      - docker.io
+      - docker-engine
+      - docker-compose
+      - containerd
+      - runc
+    state: absent
+    autoremove: true
+  tags: docker_install
+
+- name: "docker | install prerequisites"
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+    state: present
+    update_cache: true
+  tags: docker_install
+
+- name: "docker | create apt keyrings directory"
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags: docker_install
+
+- name: "docker | import Docker GPG key"
+  ansible.builtin.shell:
+    cmd: |
+      curl -fsSL https://download.docker.com/linux/debian/gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+      chmod a+r /etc/apt/keyrings/docker.gpg
+    creates: /etc/apt/keyrings/docker.gpg
+  tags: docker_install
+
+- name: "docker | add Docker apt repository"
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ ansible_architecture | replace('x86_64', 'amd64') }}
+      signed-by=/etc/apt/keyrings/docker.gpg]
+      https://download.docker.com/linux/debian
+      {{ ansible_distribution_release }} stable
+    state: present
+    filename: docker
+  tags: docker_install
+
+- name: "docker | update apt cache after adding repository"
+  ansible.builtin.apt:
+    update_cache: true
+  tags: docker_install
+
+- name: "docker | install Docker CE and Compose plugin"
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: present
+  tags: docker_install
+
+- name: "docker | configure daemon (log rotation, security defaults)"
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "{{ docker_log_max_size }}",
+          "max-file": "{{ docker_log_max_file }}"
+        },
+        "live-restore": true,
+        "userland-proxy": false,
+        "no-new-privileges": true,
+        "icc": false
+      }
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart docker
+  tags: docker_config
+
+- name: "docker | start and enable Docker"
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+  tags: docker_service
+
+- name: "docker | wait for Docker socket"
+  ansible.builtin.wait_for:
+    path: /var/run/docker.sock
+    state: present
+    timeout: 30
+  tags: docker_service
+
+- name: "docker | add bot-runner to docker group"
+  ansible.builtin.user:
+    name: "{{ bot_user }}"
+    groups: docker
+    append: true
+  tags: docker_users
+
+- name: "docker | verify Docker installation"
+  ansible.builtin.command: docker --version
+  register: docker_version_output
+  changed_when: false
+  tags: docker_verify
+
+- name: "docker | print Docker version"
+  ansible.builtin.debug:
+    msg: "{{ docker_version_output.stdout }}"
+  tags: docker_verify
