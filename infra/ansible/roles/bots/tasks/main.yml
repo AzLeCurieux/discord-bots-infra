@@ -1,0 +1,113 @@
+---
+
+- name: "bots | create per-bot directories"
+  ansible.builtin.file:
+    path: "{{ bots_dir }}/{{ item }}"
+    state: directory
+    owner: "{{ bot_user }}"
+    group: "{{ bot_user }}"
+    mode: "0750"
+  loop: "{{ bot_names }}"
+  tags: bots_dirs
+
+- name: "bots | create persistent data directories"
+  ansible.builtin.file:
+    path: "{{ bots_dir }}/{{ item }}/data"
+    state: directory
+    owner: "{{ bot_user }}"
+    group: "{{ bot_user }}"
+    mode: "0750"
+  loop: "{{ bot_names }}"
+  tags: bots_dirs
+
+- name: "bots | deploy .env for bot-moderation"
+  ansible.builtin.template:
+    src: bot.env.j2
+    dest: "{{ bots_dir }}/bot-moderation/.env"
+    owner: "{{ bot_user }}"
+    group: "{{ bot_user }}"
+    mode: "0600"
+  vars:
+    bot_name: bot-moderation
+    discord_token: "{{ vault_discord_token_moderation }}"
+    guild_id: "{{ vault_guild_id }}"
+    log_channel_id: "{{ vault_log_channel_id }}"
+    status_channel_id: ""
+  tags: bots_config
+
+- name: "bots | deploy .env for bot-status"
+  ansible.builtin.template:
+    src: bot.env.j2
+    dest: "{{ bots_dir }}/bot-status/.env"
+    owner: "{{ bot_user }}"
+    group: "{{ bot_user }}"
+    mode: "0600"
+  vars:
+    bot_name: bot-status
+    discord_token: "{{ vault_discord_token_status }}"
+    guild_id: "{{ vault_guild_id }}"
+    log_channel_id: ""
+    status_channel_id: "{{ vault_status_channel_id }}"
+  tags: bots_config
+
+- name: "bots | deploy docker-compose.yml"
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ bots_dir }}/docker-compose.yml"
+    owner: "{{ bot_user }}"
+    group: "{{ bot_user }}"
+    mode: "0640"
+  tags: bots_compose
+
+- name: "bots | authenticate to GHCR"
+  community.docker.docker_login:
+    registry_url: "{{ ghcr_registry }}"
+    username: "{{ vault_ghcr_username }}"
+    password: "{{ vault_ghcr_token }}"
+    reauthorize: true
+  become_user: "{{ bot_user }}"
+  tags: bots_pull
+
+- name: "bots | pull Docker images from GHCR"
+  community.docker.docker_image:
+    name: "{{ bot_images[item].image }}:{{ bot_images[item].tag }}"
+    source: pull
+    force_source: true
+  loop: "{{ bot_names }}"
+  become_user: "{{ bot_user }}"
+  tags: bots_pull
+
+- name: "bots | start containers"
+  community.docker.docker_compose_v2:
+    project_src: "{{ bots_dir }}"
+    files:
+      - docker-compose.yml
+    state: present
+    pull: always
+    remove_orphans: true
+  become_user: "{{ bot_user }}"
+  tags: bots_start
+
+- name: "bots | wait for bot-moderation health endpoint"
+  ansible.builtin.uri:
+    url: "http://localhost:8081/health"
+    method: GET
+    status_code: 200
+  register: health_check
+  retries: 10
+  delay: 5
+  until: health_check.status == 200
+  failed_when: false
+  tags: bots_verify
+
+- name: "bots | print container status"
+  ansible.builtin.command:
+    cmd: docker compose -f {{ bots_dir }}/docker-compose.yml ps
+  register: compose_ps
+  changed_when: false
+  tags: bots_verify
+
+- name: "bots | show container status"
+  ansible.builtin.debug:
+    msg: "{{ compose_ps.stdout_lines }}"
+  tags: bots_verify
