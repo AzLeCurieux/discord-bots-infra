@@ -1,0 +1,115 @@
+---
+
+- name: "monitoring | create /opt/monitoring directory"
+  ansible.builtin.file:
+    path: "{{ monitoring_dir }}"
+    state: directory
+    owner: root
+    group: docker
+    mode: "0775"
+  tags: monitoring_dirs
+
+- name: "monitoring | create configuration subdirectories"
+  ansible.builtin.file:
+    path: "{{ monitoring_dir }}/{{ item }}"
+    state: directory
+    owner: root
+    group: docker
+    mode: "0775"
+  loop:
+    - prometheus
+    - prometheus/data
+    - grafana
+    - grafana/data
+    - grafana/provisioning
+    - grafana/provisioning/datasources
+    - grafana/provisioning/dashboards
+  tags: monitoring_dirs
+
+- name: "monitoring | deploy Prometheus configuration"
+  ansible.builtin.copy:
+    src: prometheus.yml
+    dest: "{{ monitoring_dir }}/prometheus/prometheus.yml"
+    owner: root
+    group: docker
+    mode: "0644"
+  tags: monitoring_config
+
+- name: "monitoring | deploy Grafana datasource provisioning"
+  ansible.builtin.copy:
+    content: |
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          type: prometheus
+          access: proxy
+          url: http://prometheus:9090
+          isDefault: true
+          editable: false
+          jsonData:
+            timeInterval: "15s"
+    dest: "{{ monitoring_dir }}/grafana/provisioning/datasources/prometheus.yml"
+    owner: root
+    group: docker
+    mode: "0644"
+  tags: monitoring_config
+
+- name: "monitoring | deploy docker-compose file"
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../monitoring/docker-compose.monitoring.yml"
+    dest: "{{ monitoring_dir }}/docker-compose.yml"
+    owner: root
+    group: docker
+    mode: "0640"
+  tags: monitoring_compose
+
+- name: "monitoring | create shared monitoring Docker network"
+  community.docker.docker_network:
+    name: monitoring
+    driver: bridge
+    ipam_config:
+      - subnet: "172.21.0.0/24"
+    state: present
+  tags: monitoring_network
+
+- name: "monitoring | start monitoring stack"
+  community.docker.docker_compose_v2:
+    project_src: "{{ monitoring_dir }}"
+    files:
+      - docker-compose.yml
+    state: present
+    pull: missing
+    remove_orphans: true
+  environment:
+    GF_SECURITY_ADMIN_PASSWORD: "{{ vault_grafana_admin_password }}"
+  tags: monitoring_start
+
+- name: "monitoring | wait for Grafana to be ready"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ grafana_port }}/api/health"
+    method: GET
+    status_code: 200
+  register: grafana_health
+  retries: 15
+  delay: 10
+  until: grafana_health.status == 200
+  tags: monitoring_verify
+
+- name: "monitoring | wait for Prometheus to be ready"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ monitoring_port }}/-/healthy"
+    method: GET
+    status_code: 200
+  register: prometheus_health
+  retries: 10
+  delay: 5
+  until: prometheus_health.status == 200
+  tags: monitoring_verify
+
+- name: "monitoring | print SSH tunnel command for access"
+  ansible.builtin.debug:
+    msg: >
+      Access via SSH tunnel:
+      ssh -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090
+      -p {{ ssh_port }} {{ bot_user }}@{{ ansible_host }}
+  tags: monitoring_verify
