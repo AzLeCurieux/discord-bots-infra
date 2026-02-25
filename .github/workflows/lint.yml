@@ -1,0 +1,191 @@
+name: Lint and Quality Checks
+
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+      - "fix/**"
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  ansible-lint:
+    name: Ansible Lint
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install ansible-lint
+        run: pip install ansible-lint==6.22.2 ansible-core==2.15.8
+
+      - name: Run ansible-lint
+        run: |
+          cd infra/ansible
+          ansible-lint site.yml --profile production
+        env:
+          ANSIBLE_ROLES_PATH: infra/ansible/roles
+
+      - name: Syntax check
+        run: |
+          cd infra/ansible
+          ansible-playbook site.yml --syntax-check \
+            -i inventory.ini \
+            -e "ansible_user=ci ansible_host=localhost"
+
+  terraform-fmt:
+    name: Terraform Format
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.6"
+
+      - name: terraform fmt check
+        run: |
+          cd infra/terraform
+          terraform fmt -check -diff -recursive
+
+      - name: terraform validate
+        run: |
+          cd infra/terraform
+          terraform init -backend=false
+          terraform validate
+        env:
+          TF_VAR_hcloud_token: "dummy_token_for_validation"
+          TF_VAR_ssh_key_name: "dummy_key"
+          TF_VAR_allowed_admin_ips: '["192.0.2.0/32"]'
+
+  hadolint:
+    name: Dockerfile Lint
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint bot-moderation Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: bots/bot-moderation/Dockerfile
+          failure-threshold: warning
+          ignore: DL3008,DL3009
+
+      - name: Lint bot-status Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: bots/bot-status/Dockerfile
+          failure-threshold: warning
+          ignore: DL3018
+
+  yamllint:
+    name: YAML Lint
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: pip install yamllint==1.33.0
+
+      - name: Write yamllint config
+        run: |
+          cat > .yamllint.yml << 'EOF'
+          extends: default
+          rules:
+            line-length:
+              max: 120
+              level: warning
+            truthy:
+              allowed-values: ["true", "false", "yes", "no"]
+            comments:
+              min-spaces-from-content: 1
+            braces:
+              max-spaces-inside: 1
+            brackets:
+              max-spaces-inside: 1
+          ignore: |
+            infra/ansible/group_vars/all/vault.yml
+            .git/
+          EOF
+
+      - name: Run yamllint
+        run: |
+          yamllint -c .yamllint.yml \
+            infra/ansible/ \
+            monitoring/ \
+            .github/workflows/
+
+  python-lint:
+    name: Python Lint
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install lint tools
+        run: pip install flake8==7.0.0 pyflakes==3.2.0
+
+      - name: Syntax check
+        run: python -m py_compile bots/bot-moderation/main.py
+
+      - name: Run flake8
+        run: |
+          flake8 bots/bot-moderation/main.py \
+            --max-line-length=100 \
+            --ignore=E501,W503
+
+  lint-summary:
+    name: Lint Summary
+    runs-on: ubuntu-22.04
+    needs:
+      - ansible-lint
+      - terraform-fmt
+      - hadolint
+      - yamllint
+      - python-lint
+    if: always()
+
+    steps:
+      - name: Check all jobs
+        run: |
+          echo "ansible-lint  : ${{ needs.ansible-lint.result }}"
+          echo "terraform-fmt : ${{ needs.terraform-fmt.result }}"
+          echo "hadolint      : ${{ needs.hadolint.result }}"
+          echo "yamllint      : ${{ needs.yamllint.result }}"
+          echo "python-lint   : ${{ needs.python-lint.result }}"
+
+          if [[ "${{ needs.terraform-fmt.result }}" == "failure" ]] || \
+             [[ "${{ needs.hadolint.result }}" == "failure" ]] || \
+             [[ "${{ needs.yamllint.result }}" == "failure" ]] || \
+             [[ "${{ needs.python-lint.result }}" == "failure" ]]; then
+            echo "One or more checks failed."
+            exit 1
+          fi
