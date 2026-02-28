@@ -1,0 +1,227 @@
+name: Build, Push & Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:  # Déclenchement manuel possible
+    inputs:
+      deploy_only:
+        description: "Redéployer sans rebuild les images (true/false)"
+        required: false
+        default: "false"
+
+# Annuler les déploiements en cours si un nouveau commit arrive
+concurrency:
+  group: ${{ github.workflow }}-deploy
+  cancel-in-progress: false  # Ne pas annuler un déploiement en cours !
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: ${{ github.repository_owner }}
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 1 — Build et push des images Docker sur GHCR
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-and-push:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-22.04
+    if: ${{ github.event.inputs.deploy_only != 'true' }}
+
+    permissions:
+      contents: read
+      packages: write  # Nécessaire pour pousser sur GHCR
+
+    strategy:
+      matrix:
+        bot:
+          - name: bot-moderation
+            context: ./bots/bot-moderation
+            dockerfile: ./bots/bot-moderation/Dockerfile
+          - name: bot-status
+            context: ./bots/bot-status
+            dockerfile: ./bots/bot-status/Dockerfile
+
+    steps:
+      - name: Checkout du dépôt
+        uses: actions/checkout@v4
+
+      # ── Configuration Docker Buildx (multi-platform) ─────────────────────────
+      - name: Configurer Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            network=host
+
+      # ── Authentification GHCR ─────────────────────────────────────────────────
+      - name: Se connecter à GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Extraction des métadonnées (tags, labels) ─────────────────────────────
+      - name: Extraire les métadonnées Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ matrix.bot.name }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=build-${{ github.run_number }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.bot.name }}
+            org.opencontainers.image.description=Discord bot — ${{ matrix.bot.name }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      # ── Build et push ─────────────────────────────────────────────────────────
+      - name: Build et push — ${{ matrix.bot.name }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.bot.context }}
+          dockerfile: ${{ matrix.bot.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.bot.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.bot.name }}
+          platforms: linux/amd64
+          provenance: false  # Désactiver pour compatibilité GHCR
+
+      # ── Résumé du build ───────────────────────────────────────────────────────
+      - name: Résumé du build
+        run: |
+          echo "### Image publiée : ${{ matrix.bot.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags :**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "**SHA :** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 2 — Déploiement sur le serveur via Ansible
+  # ─────────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-22.04
+    needs: build-and-push
+    if: |
+      always() &&
+      (needs.build-and-push.result == 'success' || needs.build-and-push.result == 'skipped')
+    environment:
+      name: production
+      url: http://${{ secrets.SERVER_IP }}:3000
+
+    steps:
+      - name: Checkout du dépôt
+        uses: actions/checkout@v4
+
+      # ── Configurer Python et Ansible ──────────────────────────────────────────
+      - name: Configurer Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Installer Ansible et dépendances
+        run: |
+          pip install \
+            ansible-core==2.15.8 \
+            jinja2==3.1.3 \
+            paramiko==3.4.0
+
+          # Installer les collections Ansible nécessaires
+          ansible-galaxy collection install \
+            community.docker:3.6.0 \
+            community.general:8.2.0 \
+            ansible.posix:1.5.4
+
+      # ── Configurer la clé SSH ─────────────────────────────────────────────────
+      - name: Configurer la clé SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Ajouter l'empreinte du serveur pour éviter la vérification interactive
+          ssh-keyscan -p 2222 -H "${{ secrets.SERVER_IP }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+          chmod 644 ~/.ssh/known_hosts
+
+      # ── Mettre à jour l'inventaire avec l'IP réelle ───────────────────────────
+      - name: Mettre à jour l'inventaire Ansible
+        run: |
+          sed -i "s|{{ server_ip }}|${{ secrets.SERVER_IP }}|g" infra/ansible/inventory.ini
+          cat infra/ansible/inventory.ini
+
+      # ── Configurer Ansible Vault ──────────────────────────────────────────────
+      - name: Configurer le mot de passe Ansible Vault
+        run: |
+          echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > /tmp/vault_password
+          chmod 600 /tmp/vault_password
+
+      # ── Test de connectivité ──────────────────────────────────────────────────
+      - name: Tester la connectivité SSH avec le serveur
+        run: |
+          cd infra/ansible
+          ansible discord_bots -i inventory.ini -m ping \
+            --private-key ~/.ssh/id_ed25519 \
+            -e "ansible_port=2222"
+        timeout-minutes: 2
+
+      # ── Déploiement des bots ──────────────────────────────────────────────────
+      - name: Déployer les bots avec Ansible
+        run: |
+          cd infra/ansible
+          ansible-playbook \
+            -i inventory.ini \
+            site.yml \
+            --tags bots \
+            --vault-password-file /tmp/vault_password \
+            --private-key ~/.ssh/id_ed25519 \
+            -e "ansible_port=2222" \
+            -e "ghcr_namespace=${{ env.IMAGE_OWNER }}" \
+            -v
+        timeout-minutes: 15
+
+      # ── Vérification post-déploiement ─────────────────────────────────────────
+      - name: Vérifier le health check de bot-moderation
+        run: |
+          MAX_ATTEMPTS=10
+          ATTEMPT=0
+          until ssh -i ~/.ssh/id_ed25519 -p 2222 -o StrictHostKeyChecking=no \
+            bot-runner@${{ secrets.SERVER_IP }} \
+            "curl -sf http://localhost:8081/health" 2>/dev/null; do
+            ATTEMPT=$((ATTEMPT + 1))
+            if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
+              echo "Health check échoué après $MAX_ATTEMPTS tentatives"
+              exit 1
+            fi
+            echo "Tentative $ATTEMPT/$MAX_ATTEMPTS — attente 10s..."
+            sleep 10
+          done
+          echo "Health check réussi !"
+        timeout-minutes: 3
+
+      # ── Nettoyage des secrets ─────────────────────────────────────────────────
+      - name: Nettoyer les secrets
+        if: always()
+        run: |
+          rm -f ~/.ssh/id_ed25519
+          rm -f /tmp/vault_password
+
+      # ── Résumé du déploiement ─────────────────────────────────────────────────
+      - name: Résumé du déploiement
+        if: always()
+        run: |
+          echo "### Déploiement en production" >> $GITHUB_STEP_SUMMARY
+          echo "| Paramètre | Valeur |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environnement | production |" >> $GITHUB_STEP_SUMMARY
+          echo "| SHA déployé | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build n° | ${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Déclenché par | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Grafana | http://${{ secrets.SERVER_IP }}:3000 |" >> $GITHUB_STEP_SUMMARY
