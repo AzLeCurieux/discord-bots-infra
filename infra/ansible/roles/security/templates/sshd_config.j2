@@ -26,7 +26,8 @@ PermitEmptyPasswords no
 
 X11Forwarding no
 AllowAgentForwarding no
-AllowTcpForwarding no
+# local: permits -L tunnels (required for monitoring access), denies -R reverse tunnels
+AllowTcpForwarding local
 PermitTunnel no
 
 KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512
